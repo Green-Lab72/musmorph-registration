@@ -1,0 +1,64 @@
+sacct -u $USER --starttime=$(date -d "1 day ago" +%Y-%m-%d) --format=JobID,JobName%100,State,ExitCode,Start,End
+
+watch 'squeue -u $USER --sort=i --format="%.18i %.9P %.30j %.8u %.8T %.10M %.9l %.6D %R"'
+
+# Show jobs completed in the last day
+sacct -u $USER --starttime=$(date -d "1 day ago" +%Y-%m-%d)
+
+# For more detailed output including job names and exit codes
+sacct -u $USER --starttime=$(date -d "1 day ago" +%Y-%m-%d) --format=JobID,JobName,State,ExitCode,Start,End
+
+xfminvert \
+  nl/XFM/GET8431-10_blur_origtonl_4.xfm \
+  inverse_transforms/GET8431-10_blur_atlastoorig.xfm
+
+transformtags \
+  atlas_landmarks.tag \
+  GET8431-10_subject_landmarks.tag \
+  -transform inverse_transforms/GET8431-10_blur_atlastoorig.xfm
+
+
+awk '{temp=$1; $1=$2; $2=temp; print $0}' test_1.tag #swaps first and second column
+
+# commands to convert .mnc from signed float to int16
+mincinfo ../test_eva_out/Z_Ctr_1_Eby_1_reoriented.mnc
+mincreshape -datatype short Z_Ctr_1_Eby_1_reoriented.mnc out_int16.mnc
+minccalc -expression 'clamp(round(A*0.5), -32768, 32767)' -datatype short -signed Z_Ctr_1_Eby_1_reoriented.mnc out_int16.mnc
+mincreshape -2 -short -unsigned -valid_range 0 65535 -image_range 0 65535 Z_Ctr_1_Eby_1_reoriented.mnc out_int16.mnc
+volflip -x -y GET8431-10_blur_nl_5.mnc GET8431-10_blur_nl_5_fixed
+
+# commands to do the backpropagation in a loop
+for mnc in ../GET*blur.mnc; do base=$(basename $mnc .mnc); xfminvert ../../../nl/XFM/"${base}"_origtonl_5.xfm "${base}"_atlastoorig.xfm; done
+for xfm in ./*.xfm; do base=$(basename $xfm _atlastoorig.xfm); transformtags ../tags/manual_landmarks.mrk.tag "${base}"_subject_landmarks.tag -transform "${base}"_atlastoorig.xfm; done
+
+
+# removes long names in the xfm files
+for f in Tag_*_to_GET9164-bot-f0-7_blur.xfm; do
+  # Extract first specimen name (between Tag_ and _to_)
+  first="${f#Tag_}"
+  first="${first%%_to_*}"
+  
+  mv "$f" "${first}.xfm"
+done
+
+
+# from test_backprop
+python3 snap_landmarks.py --tag-in tags/GET8434-3top_blur_subject_landmarks.tag --mesh-in ~/heatmap/output/GET8434-3top_blur_nl_5_mesh.ply --tag-out snapped_landmarks/GET8434-3top_blur_subject_landmarks_snapped.tag --max-dist-mm 0.5
+
+python3 snap_landmarks.py --tag-in ~/heatmap/temp/labels/GET8434-3top_blur_subject_landmarks.tag --mesh-in ~/heatmap/output/GET8434-3top_blur_lsq6_mesh.ply --tag-out something.tag
+
+
+# change time allocation
+find . -name "lsq12_Third*" -exec sed -i 's/#SBATCH --time=07:00:00/#SBATCH --time=20:00:00/' {} +
+
+# add conda environment in job script
+sed -i '7i set -euo pipefail\nexport PATH="/ix1/rgreen/mdj72/miniconda3/envs/mdj_env/bin:$PATH"' lsq12_Fourth*
+find . -maxdepth 1 -name "*.sh" | xargs sed -i 's|module load minc/1.9.18|export MINC_TOOLKIT=/ihome/rgreen/mdj72/minc-toolkit_v2/opt/minc/1.9.18\nexport PATH=$MINC_TOOLKIT/bin:$MINC_TOOLKIT/pipeline:$PATH\nexport LD_LIBRARY_PATH=$MINC_TOOLKIT/lib:$LD_LIBRARY_PATH\nexport MINC_FORCE_V2=1|g'
+
+# Get mask by using average
+mincstats -min -max -mean -median LM_average.mnc
+mincmath -gt -const 0.17 LM_average.mnc LM_average_mask.mnc
+
+# Download from remote to mounted drive
+until rsync -av -P --timeout=60 mdj72@htc.crc.pitt.edu:/ix1/rgreen/mdj72/Landmarking_2 \
+ ~/smb_transfer/Green_Lab/mdj72/; do echo "rsync failed, retrying in 30 seconds..."; sleep 30; done
